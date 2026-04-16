@@ -1,0 +1,23 @@
+# Build outputs
+/build/
+/build-*/
+/cmake-build-*/
+
+# Root-level CMake/Ninja generated files
+/CMakeCache.txt
+/CMakeFiles/
+/build.ninja
+/.ninja_deps
+/.ninja_log
+/cmake_install.cmake
+/install_manifest.txt
+/compile_commands.json
+/CTestTestfile.cmake
+
+# IDE files
+/.idea/
+/.vscode/
+
+# Local-only instructions
+/AGENTS.md
+/agent.md
