@@ -35,7 +35,20 @@ message("Build type: " ${CMAKE_BUILD_TYPE})
 enable_language(C ASM)
 
 # Create an executable object type
-add_executable(${CMAKE_PROJECT_NAME})
+add_executable(${CMAKE_PROJECT_NAME}
+        Bsp/TB6612.c
+        Bsp/TB6612.h
+        Bsp/encoder.c
+        Bsp/encoder.h
+        Bsp/icm42688p.c
+        Bsp/icm42688p.h
+        Bsp/buzzer.c
+        Bsp/buzzer.h
+        Bsp/camera_uart.c
+        Bsp/camera_uart.h
+        Bsp/screen_uart.c
+        Bsp/screen_uart.h
+)
 
 # Add STM32CubeMX generated sources
 add_subdirectory(cmake/stm32cubemx)
@@ -53,6 +66,10 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
 # Add include paths
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined include paths
+        ${CMAKE_SOURCE_DIR}/bsp
+        ${CMAKE_SOURCE_DIR}/APP
+        ${CMAKE_SOURCE_DIR}/Algorithm
+        ${CMAKE_SOURCE_DIR}/Module
 )
 
 # Add project symbols (macros)
