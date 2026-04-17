@@ -16,12 +16,26 @@
 #define ICM42688_ACCEL_AAF_STATIC3_DEFAULT   ((uint8_t)0x09U)
 #define ICM42688_ACCEL_AAF_STATIC4_DEFAULT   ((uint8_t)0xC0U)
 
+#define ICM42688_SPI_DMA_BUFFER_SIZE         ((uint16_t)256U)
+
+typedef enum
+{
+    ICM42688_SPI_DMA_IDLE = 0,
+    ICM42688_SPI_DMA_BUSY,
+    ICM42688_SPI_DMA_DONE,
+    ICM42688_SPI_DMA_ERROR
+} icm42688_spi_dma_state_t;
+
 static icm42688_port_t s_icm42688_port = {0};
 static icm42688_config_t s_icm42688_config = {0};
 static float s_icm42688_accel_sensitivity = 0.0f;
 static float s_icm42688_gyro_sensitivity = 0.0f;
 static uint8_t s_icm42688_ready = 0U;
 static uint8_t s_icm42688_data_ready = 0U;
+static volatile icm42688_spi_dma_state_t s_icm42688_spi_dma_state = ICM42688_SPI_DMA_IDLE;
+static volatile uint32_t s_icm42688_spi_dma_error = HAL_SPI_ERROR_NONE;
+static uint8_t s_icm42688_spi_tx_buffer[ICM42688_SPI_DMA_BUFFER_SIZE + 1U] = {0};
+static uint8_t s_icm42688_spi_rx_buffer[ICM42688_SPI_DMA_BUFFER_SIZE + 1U] = {0};
 
 /**
  * @brief 将 HAL 返回值转换为驱动状态码。
@@ -79,32 +93,63 @@ static void ICM42688_CsDeselect(void)
 }
 
 /**
- * @brief 通过 SPI 交换一个字节。
- * @param tx_byte 待发送字节。
- * @param rx_byte 接收字节输出指针，可为 NULL。
- * @return 交换结果状态。
+ * @brief 等待一次 SPI DMA 事务完成。
+ * @return 事务结果状态。
  */
-static icm42688_status_t ICM42688_SpiTransferByte(uint8_t tx_byte, uint8_t *rx_byte)
+static icm42688_status_t ICM42688_WaitForDmaTransfer(void)
+{
+    uint32_t start_tick = HAL_GetTick();
+
+    while (s_icm42688_spi_dma_state == ICM42688_SPI_DMA_BUSY)
+    {
+        if ((HAL_GetTick() - start_tick) >= s_icm42688_port.timeout_ms)
+        {
+            (void)HAL_SPI_Abort(s_icm42688_port.hspi);
+            s_icm42688_spi_dma_state = ICM42688_SPI_DMA_IDLE;
+            s_icm42688_spi_dma_error = HAL_SPI_ERROR_NONE;
+            return ICM42688_STATUS_TIMEOUT;
+        }
+    }
+
+    if (s_icm42688_spi_dma_state == ICM42688_SPI_DMA_DONE)
+    {
+        s_icm42688_spi_dma_state = ICM42688_SPI_DMA_IDLE;
+        s_icm42688_spi_dma_error = HAL_SPI_ERROR_NONE;
+        return ICM42688_STATUS_OK;
+    }
+
+    s_icm42688_spi_dma_state = ICM42688_SPI_DMA_IDLE;
+    s_icm42688_spi_dma_error = HAL_SPI_ERROR_NONE;
+    return ICM42688_STATUS_ERROR;
+}
+
+/**
+ * @brief 通过 DMA 执行一次完整 SPI 全双工事务。
+ * @param tx_buffer DMA 发送缓冲区。
+ * @param rx_buffer DMA 接收缓冲区。
+ * @param size 事务总字节数。
+ * @return 事务结果状态。
+ */
+static icm42688_status_t ICM42688_SpiTransferDma(uint8_t *tx_buffer, uint8_t *rx_buffer, uint16_t size)
 {
     HAL_StatusTypeDef hal_status;
-    uint8_t rx_data = 0U;
 
-    hal_status = HAL_SPI_TransmitReceive(s_icm42688_port.hspi,
-                                         &tx_byte,
-                                         &rx_data,
-                                         1U,
-                                         s_icm42688_port.timeout_ms);
+    if ((tx_buffer == NULL) || (rx_buffer == NULL) || (size == 0U))
+    {
+        return ICM42688_STATUS_BAD_PARAM;
+    }
+
+    s_icm42688_spi_dma_error = HAL_SPI_ERROR_NONE;
+    s_icm42688_spi_dma_state = ICM42688_SPI_DMA_BUSY;
+
+    hal_status = HAL_SPI_TransmitReceive_DMA(s_icm42688_port.hspi, tx_buffer, rx_buffer, size);
     if (hal_status != HAL_OK)
     {
+        s_icm42688_spi_dma_state = ICM42688_SPI_DMA_IDLE;
         return ICM42688_HalToStatus(hal_status);
     }
 
-    if (rx_byte != NULL)
-    {
-        *rx_byte = rx_data;
-    }
-
-    return ICM42688_STATUS_OK;
+    return ICM42688_WaitForDmaTransfer();
 }
 
 /**
@@ -120,25 +165,28 @@ static icm42688_status_t ICM42688_BusRead(uint8_t reg, uint8_t *buffer, uint16_t
     uint16_t index;
     icm42688_status_t status;
 
-    if ((buffer == NULL) || (length == 0U))
+    if ((buffer == NULL) || (length == 0U) || (length > ICM42688_SPI_DMA_BUFFER_SIZE))
     {
         return ICM42688_STATUS_BAD_PARAM;
     }
 
     reg_addr = reg | ICM42688_SPI_READ_MASK;
+    s_icm42688_spi_tx_buffer[0] = reg_addr;
+    for (index = 0U; index < length; index++)
+    {
+        s_icm42688_spi_tx_buffer[index + 1U] = 0xFFU;
+    }
 
     ICM42688_CsSelect();
 
-    status = ICM42688_SpiTransferByte(reg_addr, NULL);
+    status = ICM42688_SpiTransferDma(s_icm42688_spi_tx_buffer,
+                                     s_icm42688_spi_rx_buffer,
+                                     (uint16_t)(length + 1U));
     if (status == ICM42688_STATUS_OK)
     {
         for (index = 0U; index < length; index++)
         {
-            status = ICM42688_SpiTransferByte(0xFFU, &buffer[index]);
-            if (status != ICM42688_STATUS_OK)
-            {
-                break;
-            }
+            buffer[index] = s_icm42688_spi_rx_buffer[index + 1U];
         }
     }
 
@@ -156,32 +204,28 @@ static icm42688_status_t ICM42688_BusRead(uint8_t reg, uint8_t *buffer, uint16_t
  */
 static icm42688_status_t ICM42688_BusWrite(uint8_t reg, const uint8_t *buffer, uint16_t length)
 {
-    HAL_StatusTypeDef hal_status;
     uint8_t reg_addr;
-    uint8_t tx_buffer[16];
     icm42688_status_t status;
 
-    if ((buffer == NULL) || (length == 0U) || (length >= (sizeof(tx_buffer))))
+    if ((buffer == NULL) || (length == 0U) || (length > ICM42688_SPI_DMA_BUFFER_SIZE))
     {
         return ICM42688_STATUS_BAD_PARAM;
     }
 
     reg_addr = reg & (uint8_t)(~ICM42688_SPI_READ_MASK);
-    tx_buffer[0] = reg_addr;
+    s_icm42688_spi_tx_buffer[0] = reg_addr;
     for (uint16_t i = 0U; i < length; i++)
     {
-        tx_buffer[i + 1U] = buffer[i];
+        s_icm42688_spi_tx_buffer[i + 1U] = buffer[i];
     }
 
     ICM42688_CsSelect();
 
-    hal_status = HAL_SPI_Transmit(s_icm42688_port.hspi,
-                                  tx_buffer,
-                                  (uint16_t)(length + 1U),
-                                  s_icm42688_port.timeout_ms);
+    status = ICM42688_SpiTransferDma(s_icm42688_spi_tx_buffer,
+                                     s_icm42688_spi_rx_buffer,
+                                     (uint16_t)(length + 1U));
     ICM42688_CsDeselect();
 
-    status = ICM42688_HalToStatus(hal_status);
     return status;
 }
 
@@ -552,6 +596,8 @@ icm42688_status_t ICM42688_Init(const icm42688_port_t *port, const icm42688_conf
     s_icm42688_config = *active_config;
     s_icm42688_ready = 0U;
     s_icm42688_data_ready = 0U;
+    s_icm42688_spi_dma_state = ICM42688_SPI_DMA_IDLE;
+    s_icm42688_spi_dma_error = HAL_SPI_ERROR_NONE;
 
     HAL_GPIO_WritePin(s_icm42688_port.cs_port, s_icm42688_port.cs_pin, GPIO_PIN_SET);
 
@@ -823,4 +869,21 @@ uint8_t ICM42688_GetDataReadyFlag(void)
 void ICM42688_ClearDataReadyFlag(void)
 {
     s_icm42688_data_ready = 0U;
+}
+
+void HAL_SPI_TxRxCpltCallback(SPI_HandleTypeDef *hspi)
+{
+    if ((hspi != NULL) && (hspi == s_icm42688_port.hspi))
+    {
+        s_icm42688_spi_dma_state = ICM42688_SPI_DMA_DONE;
+    }
+}
+
+void HAL_SPI_ErrorCallback(SPI_HandleTypeDef *hspi)
+{
+    if ((hspi != NULL) && (hspi == s_icm42688_port.hspi))
+    {
+        s_icm42688_spi_dma_error = hspi->ErrorCode;
+        s_icm42688_spi_dma_state = ICM42688_SPI_DMA_ERROR;
+    }
 }
