@@ -25,6 +25,7 @@ set(MX_Application_Src
     ${CMAKE_SOURCE_DIR}/Core/Src/main.c
     ${CMAKE_SOURCE_DIR}/Core/Src/gpio.c
     ${CMAKE_SOURCE_DIR}/Core/Src/freertos.c
+    ${CMAKE_SOURCE_DIR}/Core/Src/dma.c
     ${CMAKE_SOURCE_DIR}/Core/Src/spi.c
     ${CMAKE_SOURCE_DIR}/Core/Src/tim.c
     ${CMAKE_SOURCE_DIR}/Core/Src/usart.c
