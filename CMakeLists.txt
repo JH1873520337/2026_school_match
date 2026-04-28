@@ -48,6 +48,8 @@ add_executable(${CMAKE_PROJECT_NAME}
         Bsp/camera_uart.h
         Bsp/screen_uart.c
         Bsp/screen_uart.h
+        Module/vision_service.c
+        Module/vision_service.h
 )
 
 # Add STM32CubeMX generated sources
