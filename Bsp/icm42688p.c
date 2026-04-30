@@ -554,8 +554,8 @@ void ICM42688_GetDefaultConfig(icm42688_config_t *config)
 
     config->gyro_fs = ICM42688_GYRO_FS_2000DPS;
     config->accel_fs = ICM42688_ACCEL_FS_16G;
-    config->gyro_odr = ICM42688_ODR_8KHZ;
-    config->accel_odr = ICM42688_ODR_8KHZ;
+    config->gyro_odr = ICM42688_ODR_1KHZ;
+    config->accel_odr = ICM42688_ODR_1KHZ;
 }
 
 icm42688_status_t ICM42688_Init(const icm42688_port_t *port, const icm42688_config_t *config)

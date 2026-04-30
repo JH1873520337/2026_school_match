@@ -48,6 +48,12 @@ add_executable(${CMAKE_PROJECT_NAME}
         Bsp/camera_uart.h
         Bsp/screen_uart.c
         Bsp/screen_uart.h
+        Algorithm/filter.c
+        Algorithm/filter.h
+        Algorithm/attitude.c
+        Algorithm/attitude.h
+        Module/imu_service.c
+        Module/imu_service.h
         Module/vision_service.c
         Module/vision_service.h
 )
@@ -84,4 +90,9 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
     stm32cubemx
 
     # Add user defined libraries
+)
+
+# Enable float formatting in printf (newlib-nano)
+target_link_options(${CMAKE_PROJECT_NAME} PRIVATE
+    -u _printf_float
 )
