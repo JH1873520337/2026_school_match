@@ -71,6 +71,8 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user sources here
         Algorithm/rope_platform_solver.c
         APP/app_platform_drive.c
+        APP/vision_app.c
+        APP/imu_app.c
 )
 
 # Add include paths
