@@ -52,6 +52,8 @@ add_executable(${CMAKE_PROJECT_NAME}
         Algorithm/filter.h
         Algorithm/attitude.c
         Algorithm/attitude.h
+        Module/alarm_service.c
+        Module/alarm_service.h
         Module/imu_service.c
         Module/imu_service.h
         Module/vision_service.c
