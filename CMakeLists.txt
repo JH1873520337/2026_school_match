@@ -54,6 +54,8 @@ add_executable(${CMAKE_PROJECT_NAME}
         Algorithm/attitude.h
         Module/imu_service.c
         Module/imu_service.h
+        Module/vision_service.c
+        Module/vision_service.h
 )
 
 # Add STM32CubeMX generated sources
