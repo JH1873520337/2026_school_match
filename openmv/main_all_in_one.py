@@ -47,13 +47,16 @@ class config:
 
     # 橙色圆的 LAB 阈值。
     ORANGE_THRESHOLDS = [
-        (20, 75, 18, 65, 20, 75),
+    (20, 75, 18, 65, 20, 75),
+    (28, 40, 12, 61, -8, 47),
     ]
 
     # 火焰的 LAB 阈值，可同时覆盖不同亮度和色温的火焰区域。
     FLAME_THRESHOLDS = [
         (18, 95, 20, 80, 15, 80),
         (35, 100, -10, 30, 20, 80),
+        (17, 35, 16, 39, 0, 53),
+        (32, 53, 29, 64, 52, -20),
     ]
 
     # find_blobs 的像素数门限，过小的色块直接忽略。
@@ -76,6 +79,10 @@ class config:
     ORANGE_ELONGATION_MAX = 0.45
     # 圆点最小圆形度，用来和火焰做互斥。
     ORANGE_ROUNDNESS_MIN = 0.78
+    # 圆点内部亮度标准差上限，过于斑驳的暖色块更像火焰。
+    ORANGE_L_STDDEV_MAX = 30
+    # 圆点和上一帧形状越接近，越倾向继续判成圆点。
+    ORANGE_STABLE_BONUS_BASE = 0.60
 
     # 火焰检测的像素数门限。
     FLAME_PIXELS_THRESHOLD = 80
@@ -102,6 +109,15 @@ class config:
     FLAME_CONFIRM_FRAMES = 2
     # 连续确认时允许的中心点最大跳变像素。
     FLAME_CONFIRM_DISTANCE = 16
+    # 火焰内部亮度标准差下限，内部过于均匀的暖色块更可能是圆点。
+    FLAME_L_STDDEV_MIN = 8
+    # 火焰默认保留少量动态分，避免首次出现时因为没有历史而被压制。
+    FLAME_FLICKER_BASE = 0.25
+
+    # 两类目标中心过近时，视为同一暖色物体的冲突候选。
+    TARGET_CONFLICT_DISTANCE = 18
+    # 冲突时分数至少拉开这么多才保留更强的一类，否则按不确定处理。
+    TARGET_CONFLICT_SCORE_MARGIN = 10
 
     # 串口包头字节 0。
     PACKET_HEADER_0 = 0xAA
@@ -156,7 +172,9 @@ class VisionTarget:
                  area=0,
                  angle=0,
                  quality=0,
-                 stale=False):
+                 stale=False,
+                 box_w=0,
+                 box_h=0):
         self.kind = kind
         self.valid = valid
         self.cx = int(cx)
@@ -167,6 +185,8 @@ class VisionTarget:
         self.angle = int(angle)
         self.quality = int(quality)
         self.stale = bool(stale)
+        self.box_w = int(box_w)
+        self.box_h = int(box_h)
 
     def copy(self):
         return VisionTarget(self.kind,
@@ -178,7 +198,9 @@ class VisionTarget:
                             self.area,
                             self.angle,
                             self.quality,
-                            self.stale)
+                            self.stale,
+                            self.box_w,
+                            self.box_h)
 
 
 def invalid_target():
@@ -305,7 +327,9 @@ class TargetTracker:
                                         area=_lerp_int(self._target.area, new_target.area, config.TRACK_SMOOTH_ALPHA),
                                         angle=_lerp_int(self._target.angle, new_target.angle, config.TRACK_SMOOTH_ALPHA),
                                         quality=max(self._target.quality, new_target.quality),
-                                        stale=False)
+                                        stale=False,
+                                        box_w=_lerp_int(self._target.box_w, new_target.box_w, config.TRACK_SMOOTH_ALPHA),
+                                        box_h=_lerp_int(self._target.box_h, new_target.box_h, config.TRACK_SMOOTH_ALPHA))
                 self._target = smoothed
             else:
                 self._target = new_target.copy()
@@ -428,6 +452,89 @@ def _blob_area(blob):
         return int(blob.w() * blob.h())
 
 
+def _safe_l_stdev(img, blob):
+    # 统计候选框内亮度起伏，圆点通常更均匀，火焰通常更斑驳。
+    try:
+        stats = img.get_statistics(roi=blob.rect())
+        return float(stats.l_stdev())
+    except Exception:
+        return 0.0
+
+
+def _circle_shape_score(aspect, density, elongation, roundness):
+    # 将“像圆”的程度压成 0 到 1，便于和纹理、时序信息一起加权。
+    aspect_score = 1.0 - min(1.0, abs(1.0 - aspect))
+    return max(0.0,
+               min(1.0,
+                   aspect_score * 0.28 + density * 0.24 + roundness * 0.30 + (1.0 - elongation) * 0.18))
+
+
+def _texture_score(l_stdev):
+    # 亮度标准差越大，内部纹理越复杂，更像真实火焰。
+    return max(0.0, min(1.0, float(l_stdev) / 32.0))
+
+
+def _feature_delta(current_metrics, last_metrics):
+    # 只比较和目标形状相关的特征，不比较中心点，适配移动摄像头场景。
+    if current_metrics is None or last_metrics is None:
+        return 0.0
+
+    return (abs(current_metrics["aspect"] - last_metrics["aspect"]) * 1.7 +
+            abs(current_metrics["density"] - last_metrics["density"]) * 1.8 +
+            abs(current_metrics["roundness"] - last_metrics["roundness"]) * 1.6 +
+            abs(current_metrics["elongation"] - last_metrics["elongation"]) * 1.2 +
+            (abs(current_metrics["l_stdev"] - last_metrics["l_stdev"]) / 35.0))
+
+
+def _targets_conflict(target_a, target_b):
+    if (not target_a.valid) or (not target_b.valid):
+        return False
+    if abs(target_a.cx - target_b.cx) > config.TARGET_CONFLICT_DISTANCE:
+        return False
+    if abs(target_a.cy - target_b.cy) > config.TARGET_CONFLICT_DISTANCE:
+        return False
+    return True
+
+
+def _resolve_target_conflict(orange_target, orange_metrics, flame_target, flame_metrics):
+    # 两类目标指向同一个暖色块时，只有明显更强的一类才能保留，否则两边都不报。
+    if not _targets_conflict(orange_target, flame_target):
+        return orange_target, flame_target
+
+    orange_score = orange_target.quality
+    flame_score = flame_target.quality
+
+    if orange_metrics is not None:
+        orange_score += int(orange_metrics["circle_score"] * 15 + orange_metrics["uniformity_score"] * 10)
+    if flame_metrics is not None:
+        flame_score += int(flame_metrics["texture_score"] * 12 + flame_metrics["flicker_score"] * 14)
+
+    if orange_score >= (flame_score + config.TARGET_CONFLICT_SCORE_MARGIN):
+        return orange_target, invalid_target()
+    if flame_score >= (orange_score + config.TARGET_CONFLICT_SCORE_MARGIN):
+        return invalid_target(), flame_target
+    return invalid_target(), invalid_target()
+
+
+def _draw_target_debug(img, orange_target, flame_target):
+    # 只绘制冲突消解后的最终目标，避免同一物体被画成两类标记。
+    if not config.DRAW_DEBUG:
+        return
+
+    if orange_target.valid:
+        radius = max(4, (orange_target.box_w + orange_target.box_h) // 4)
+        img.draw_circle(orange_target.cx, orange_target.cy, radius, color=(255, 128, 0), thickness=2)
+        img.draw_cross(orange_target.cx, orange_target.cy, color=(255, 128, 0))
+
+    if flame_target.valid:
+        left = max(0, flame_target.cx - (flame_target.box_w // 2))
+        top = max(0, flame_target.cy - (flame_target.box_h // 2))
+        width = max(2, flame_target.box_w)
+        height = max(2, flame_target.box_h)
+        img.draw_rectangle(left, top, width, height, color=(255, 0, 0), thickness=2)
+        img.draw_cross(flame_target.cx, flame_target.cy, color=(255, 255, 0))
+
+
 def _looks_like_orange_circle_shape(aspect, density, elongation, roundness):
     # 圆点必须同时满足接近方形、足够致密、细长度低、圆形度高。
     if aspect < config.ORANGE_ASPECT_MIN or aspect > config.ORANGE_ASPECT_MAX:
@@ -442,6 +549,9 @@ def _looks_like_orange_circle_shape(aspect, density, elongation, roundness):
 
 
 class OrangeCircleDetector:
+    def __init__(self):
+        self._last_metrics = None
+
     def detect(self, img):
         # 检测橙色圆形目标，并返回评分最高的一个。
         blobs = img.find_blobs(config.ORANGE_THRESHOLDS,
@@ -450,6 +560,7 @@ class OrangeCircleDetector:
                                merge=True,
                                margin=config.ORANGE_MERGE_MARGIN)
         best_target = None
+        best_metrics = None
         best_score = -1
         img_cx = img.width() // 2
         img_cy = img.height() // 2
@@ -467,11 +578,35 @@ class OrangeCircleDetector:
             if not _looks_like_orange_circle_shape(aspect, density, elongation, roundness):
                 continue
 
+            l_stdev = _safe_l_stdev(img, blob)
+            if l_stdev > config.ORANGE_L_STDDEV_MAX:
+                continue
+
             area = _blob_area(blob)
+            circle_score = _circle_shape_score(aspect, density, elongation, roundness)
+            uniformity_score = 1.0 - _texture_score(l_stdev)
+            metrics = {
+                "aspect": aspect,
+                "density": density,
+                "elongation": elongation,
+                "roundness": roundness,
+                "l_stdev": l_stdev,
+                "circle_score": circle_score,
+                "uniformity_score": uniformity_score,
+            }
+
+            stability_score = config.ORANGE_STABLE_BONUS_BASE
+            if self._last_metrics is not None:
+                stability_score = max(0.0, min(1.0, 1.0 - _feature_delta(metrics, self._last_metrics)))
+
             # 综合面积、密度、接近圆形程度选出最优候选。
             aspect_score = 1.0 - abs(1.0 - aspect)
-            score = int(area * (0.30 + density) * (0.35 + aspect_score) * (0.35 + roundness))
-            quality = int(min(100, max(0, density * 35 + aspect_score * 25 + roundness * 25 + (1.0 - elongation) * 15)))
+            score = int(area * (0.30 + density) * (0.35 + aspect_score) * (0.30 + circle_score) * (0.30 + uniformity_score) * (0.35 + stability_score))
+            quality = int(min(100,
+                              max(0,
+                                  density * 26 + aspect_score * 18 + roundness * 18 +
+                                  (1.0 - elongation) * 12 + circle_score * 12 +
+                                  uniformity_score * 8 + stability_score * 6)))
 
             target = VisionTarget(kind=TARGET_ORANGE_CIRCLE,
                                   valid=True,
@@ -482,23 +617,26 @@ class OrangeCircleDetector:
                                   ey=_norm_error(blob.cy() - img_cy, img.height() // 2),
                                   area=area,
                                   angle=0,
-                                  quality=quality)
+                                  quality=quality,
+                                  box_w=w,
+                                  box_h=h)
 
             if score > best_score:
                 best_score = score
                 best_target = target
+                best_metrics = metrics
 
-            if config.DRAW_DEBUG:
-                radius = (w + h) // 4
-                img.draw_circle(blob.cx(), blob.cy(), radius, color=(255, 128, 0), thickness=2)
-                img.draw_cross(blob.cx(), blob.cy(), color=(255, 128, 0))
+        self._last_metrics = best_metrics
 
         if best_target is None:
-            return invalid_target()
-        return best_target
+            return invalid_target(), None
+        return best_target, best_metrics
 
 
 class FlameDetector:
+    def __init__(self):
+        self._last_metrics = None
+
     def detect(self, img):
         # 检测火焰目标，并返回评分最高的一个。
         blobs = img.find_blobs(config.FLAME_THRESHOLDS,
@@ -507,6 +645,7 @@ class FlameDetector:
                                merge=True,
                                margin=config.FLAME_MERGE_MARGIN)
         best_target = None
+        best_metrics = None
         best_score = -1
         img_cx = img.width() // 2
         img_cy = img.height() // 2
@@ -543,11 +682,36 @@ class FlameDetector:
             if _looks_like_orange_circle_shape(aspect, density, elongation, roundness):
                 continue
 
+            l_stdev = _safe_l_stdev(img, blob)
+            if l_stdev < config.FLAME_L_STDDEV_MIN:
+                continue
+
             area = _blob_area(blob)
+            texture_score = _texture_score(l_stdev)
+            metrics = {
+                "aspect": aspect,
+                "density": density,
+                "elongation": elongation,
+                "roundness": roundness,
+                "l_stdev": l_stdev,
+                "circle_score": _circle_shape_score(aspect, density, elongation, roundness),
+                "texture_score": texture_score,
+                "flicker_score": config.FLAME_FLICKER_BASE,
+            }
+
+            flicker_score = config.FLAME_FLICKER_BASE
+            if self._last_metrics is not None:
+                flicker_score = max(config.FLAME_FLICKER_BASE,
+                                    min(1.0, _feature_delta(metrics, self._last_metrics)))
+            metrics["flicker_score"] = flicker_score
+
             # 结合面积、暖色形状特征和密度来选最像火焰的目标。
             warm_shape_score = 1.0 - min(1.0, abs(0.75 - aspect))
-            score = int(area * (0.35 + warm_shape_score) * (0.60 + density))
-            quality = int(min(100, max(0, density * 55 + warm_shape_score * 25 + (1.0 - elongation) * 20)))
+            score = int(area * (0.35 + warm_shape_score) * (0.45 + density) * (0.35 + texture_score) * (0.30 + flicker_score))
+            quality = int(min(100,
+                              max(0,
+                                  density * 32 + warm_shape_score * 20 + (1.0 - elongation) * 12 +
+                                  texture_score * 20 + flicker_score * 16)))
 
             target = VisionTarget(kind=TARGET_FLAME,
                                   valid=True,
@@ -557,19 +721,20 @@ class FlameDetector:
                                   ey=_norm_error(cy - img_cy, img.height() // 2),
                                   area=area,
                                   angle=0,
-                                  quality=quality)
+                                  quality=quality,
+                                  box_w=w,
+                                  box_h=h)
 
             if score > best_score:
                 best_score = score
                 best_target = target
+                best_metrics = metrics
 
-            if config.DRAW_DEBUG:
-                img.draw_rectangle(blob.rect(), color=(255, 0, 0), thickness=2)
-                img.draw_cross(cx, cy, color=(255, 255, 0))
+        self._last_metrics = best_metrics
 
         if best_target is None:
-            return invalid_target()
-        return best_target
+            return invalid_target(), None
+        return best_target, best_metrics
 
 
 def _init_sensor():
@@ -648,9 +813,14 @@ def main():
         img = sensor.snapshot()
         now_ms = millis()
 
-        # 每帧同时检测两类目标，并分别独立跟踪，避免互相抢占串口输出。
-        orange_target = orange_tracker.update(orange_detector.detect(img), now_ms)
-        flame_target = flame_tracker.update(flame_detector.detect(img), now_ms)
+        # 每帧同时检测两类目标，并在进入跟踪前做一次冲突消解。
+        orange_raw, orange_metrics = orange_detector.detect(img)
+        flame_raw, flame_metrics = flame_detector.detect(img)
+        orange_raw, flame_raw = _resolve_target_conflict(orange_raw, orange_metrics, flame_raw, flame_metrics)
+        _draw_target_debug(img, orange_raw, flame_raw)
+
+        orange_target = orange_tracker.update(orange_raw, now_ms)
+        flame_target = flame_tracker.update(flame_raw, now_ms)
 
         _draw_status(img, orange_target, flame_target, clock.fps())
 
