@@ -79,6 +79,10 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
         APP/task2.h
         APP/task3.c
         APP/task3.h
+        APP/task5.c
+        APP/task5.h
+        APP/task6.c
+        APP/task6.h
         APP/vision_app.c
 )
 

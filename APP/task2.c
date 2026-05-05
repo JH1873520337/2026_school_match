@@ -6,10 +6,8 @@
 #include <stddef.h>
 #include <string.h>
 
-#define TASK2_GOTO_PWM_ABS              ((int16_t)360)
-#define TASK2_GOTO_PWM_SLOW_ABS         ((int16_t)260)
+#define TASK2_GOTO_PWM_ABS              ((int16_t)460)
 #define TASK2_GOTO_COUNT_TOLERANCE      ((int32_t)8)
-#define TASK2_GOTO_COUNT_NEAR_THRESHOLD ((int32_t)80)
 
 typedef struct
 {
@@ -18,10 +16,10 @@ typedef struct
 
 static const task2_fixed_point_t s_task2_fixed_points[TASK2_POINT_COUNT] =
 {
-    { { 5367, -2061, -6074, -1950 } }, /* LT */
-    { { -1953, -6180, -1686, 6158 } }, /* RT */
-    { { -5875, -1295, 5255, -1218 } }, /* RB */
-    { { -1542, 6308, -1730, -5878 } }  /* LB */
+    { { 5106, -2274, -6461, -2798 } }, /* LT */
+    { { -2346, -6647, -2585, 6449 } }, /* RT */
+    { { -6318, -1886, 5384, -1687 } }, /* RB */
+    { { -1860, 5725, -2229, -6568 } }  /* LB */
 };
 
 static const tb6612_motor_t s_task2_motor_map[ROPE_PLATFORM_SOLVER_CABLE_COUNT] =
@@ -55,11 +53,6 @@ static int16_t Task2_ErrorToPwm(int32_t count_error)
     if (abs_error <= TASK2_GOTO_COUNT_TOLERANCE)
     {
         return 0;
-    }
-
-    if (abs_error <= TASK2_GOTO_COUNT_NEAR_THRESHOLD)
-    {
-        return (count_error > 0) ? TASK2_GOTO_PWM_SLOW_ABS : -TASK2_GOTO_PWM_SLOW_ABS;
     }
 
     return (count_error > 0) ? TASK2_GOTO_PWM_ABS : -TASK2_GOTO_PWM_ABS;

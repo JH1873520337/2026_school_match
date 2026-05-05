@@ -27,12 +27,13 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "app_platform_drive.h"
-#include "TB6612.h"
+#include "alarm_service.h"
 #include "camera_uart.h"
 #include "encoder.h"
 #include "icm42688p.h"
 #include "screen_uart.h"
-#include "task3.h"
+#include "task5.h"
+#include "task6.h"
 #include "vision_app.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -46,10 +47,6 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define APP_GOTO_PWM_ABS              ((int16_t)360)
-#define APP_GOTO_PWM_SLOW_ABS         ((int16_t)260)
-#define APP_GOTO_COUNT_TOLERANCE      ((int32_t)8)
-#define APP_GOTO_COUNT_NEAR_THRESHOLD ((int32_t)80)
 
 /* USER CODE END PD */
 
@@ -76,7 +73,8 @@ static void App_PrintHelp(void);
 static uint8_t App_ReadAllEncoderCounts(int32_t counts[ENCODER_COUNT]);
 static void App_PrintEncoderCounts(const char *prefix, const int32_t counts[ENCODER_COUNT]);
 static void App_PrintPlatformState(void);
-static const char *App_PointName(uint8_t point_index);
+static const char *App_Task5PointName(uint8_t point_index);
+static void App_PrintTask5Table(void);
 
 /* USER CODE END PFP */
 
@@ -84,8 +82,7 @@ static const char *App_PointName(uint8_t point_index);
 /* USER CODE BEGIN 0 */
 static void App_PrintHelp(void)
 {
-  (void)ScreenUart_Printf("point map: 1=LT 2=RT 3=RB 4=LB 5=C\r\n");
-  (void)ScreenUart_Printf("cmd: zero, 1, 2, 3, 4, 5, enc, stat, help\r\n");
+  (void)ScreenUart_Printf("task6 cmd: zero, t6_mark=1..2, t6_run, t6_stop, t6_stat, t6_list\r\n");
 }
 
 static uint8_t App_ReadAllEncoderCounts(int32_t counts[ENCODER_COUNT])
@@ -123,6 +120,78 @@ static void App_PrintEncoderCounts(const char *prefix, const int32_t counts[ENCO
                           (long)counts[3]);
 }
 
+static const char *App_Task5PointName(uint8_t point_index)
+{
+  switch (point_index)
+  {
+    case 1U:
+      return "LT";
+    case 2U:
+      return "RT";
+    case 3U:
+      return "R(+20,+10)";
+    case 4U:
+      return "L(-20,+10)";
+    case 5U:
+      return "L(-20,0)";
+    case 6U:
+      return "R(+20,0)";
+    case 7U:
+      return "R(+20,-10)";
+    case 8U:
+      return "L(-20,-10)";
+    case 9U:
+      return "LB";
+    case 10U:
+      return "RB";
+    default:
+      return "?";
+  }
+}
+
+static void App_PrintTask5Table(void)
+{
+  task5_waypoint_t waypoint;
+  task6_fire_point_t fire_point;
+  uint8_t point_id;
+  uint8_t fire_id;
+
+  for (point_id = 1U; point_id <= (uint8_t)TASK5_POINT_COUNT; point_id++)
+  {
+    if (Task5_GetWaypoint((task5_point_id_t)point_id, &waypoint) == 0U)
+    {
+      continue;
+    }
+
+    (void)ScreenUart_Printf("p%u(%s) xy=(%d,%d) valid=%u counts={ %ld, %ld, %ld, %ld }\r\n",
+                            (unsigned int)point_id,
+                            App_Task5PointName(point_id),
+                            (int)waypoint.x_cm,
+                            (int)waypoint.y_cm,
+                            (unsigned int)waypoint.valid,
+                            (long)waypoint.counts[0],
+                            (long)waypoint.counts[1],
+                            (long)waypoint.counts[2],
+                            (long)waypoint.counts[3]);
+  }
+
+  for (fire_id = 1U; fire_id <= TASK6_FIRE_POINT_COUNT; fire_id++)
+  {
+    if (Task6_GetFirePoint(fire_id, &fire_point) == 0U)
+    {
+      continue;
+    }
+
+    (void)ScreenUart_Printf("fire%u valid=%u counts={ %ld, %ld, %ld, %ld }\r\n",
+                            (unsigned int)fire_id,
+                            (unsigned int)fire_point.valid,
+                            (long)fire_point.counts[0],
+                            (long)fire_point.counts[1],
+                            (long)fire_point.counts[2],
+                            (long)fire_point.counts[3]);
+  }
+}
+
 static void App_PrintPlatformState(void)
 {
   const rope_platform_solver_t *solver = AppPlatformDrive_GetSolver(&s_platform_drive);
@@ -133,32 +202,40 @@ static void App_PrintPlatformState(void)
     return;
   }
 
-  (void)ScreenUart_Printf("pose x=%.4f y=%.4f vx=%.4f vy=%.4f rms=%.5f zero=%u goto=%u\r\n",
+  (void)ScreenUart_Printf("pose x=%.4f y=%.4f vx=%.4f vy=%.4f rms=%.5f zero=%u busy=%u\r\n",
                           (double)solver->position_x_m,
                           (double)solver->position_y_m,
                           (double)solver->velocity_x_mps,
                           (double)solver->velocity_y_mps,
                           (double)solver->residual_rms_m,
-                          (unsigned int)Task3_IsCenterZeroReady(),
-                          (unsigned int)Task3_IsBusy());
+                          (unsigned int)Task6_IsCenterZeroReady(),
+                          (unsigned int)Task6_IsBusy());
+  (void)ScreenUart_Printf("task6 zero=%u busy=%u state=%u step=%u target=%u fire_alarm=%u fire_ready=%u\r\n",
+                          (unsigned int)Task6_IsCenterZeroReady(),
+                          (unsigned int)Task6_IsBusy(),
+                          (unsigned int)Task6_GetState(),
+                          (unsigned int)Task6_GetCurrentPathIndex(),
+                          (unsigned int)Task6_GetCurrentTarget(),
+                          (unsigned int)Task6_IsFireAlarmActive(),
+                          (unsigned int)Task6_IsFirePointsReady());
 }
 
-static const char *App_PointName(uint8_t point_index)
+static void App_PrintTask6CurrentStep(void)
 {
-  switch (point_index)
+  const uint8_t fire_id = Task6_GetCurrentFireId();
+
+  if (fire_id != 0U)
   {
-    case 1U:
-      return "LT";
-    case 2U:
-      return "RT";
-    case 3U:
-      return "RB";
-    case 4U:
-      return "LB";
-    case 5U:
-      return "C";
-    default:
-      return "?";
+    (void)ScreenUart_Printf("t6 current step=%u fire%u\r\n",
+                            (unsigned int)Task6_GetCurrentPathIndex(),
+                            (unsigned int)fire_id);
+  }
+  else
+  {
+    (void)ScreenUart_Printf("t6 current step=%u p%u(%s)\r\n",
+                            (unsigned int)Task6_GetCurrentPathIndex(),
+                            (unsigned int)Task6_GetCurrentTarget(),
+                            App_Task5PointName((uint8_t)Task6_GetCurrentTarget()));
   }
 }
 
@@ -184,11 +261,13 @@ static void App_HandleScreenCommands(void)
 
     if (strcmp(line, "zero") == 0)
     {
+      Task6_Stop();
+
       if (Encoder_ResetAll() != ENCODER_STATUS_OK)
       {
         (void)ScreenUart_Printf("enc zero failed\r\n");
       }
-      else if (Task3_SetCenterZero() == 0U)
+      else if (Task6_SetCenterZero() == 0U)
       {
         (void)ScreenUart_Printf("center zero failed\r\n");
       }
@@ -199,31 +278,58 @@ static void App_HandleScreenCommands(void)
       continue;
     }
 
-    if ((strlen(line) == 1U) &&
-        (line[0] >= '1') &&
-        (line[0] <= '5'))
+    if (strncmp(line, "t6_mark=", 8U) == 0)
     {
-      const uint8_t target = (uint8_t)(line[0] - '0');
+      const int fire_point_id = atoi(&line[8]);
 
-      if (Task3_IsCenterZeroReady() == 0U)
+      if ((fire_point_id < 1) || (fire_point_id > (int)TASK6_FIRE_POINT_COUNT))
+      {
+        (void)ScreenUart_Printf("t6 mark id invalid\r\n");
+      }
+      else if (Task6_IsCenterZeroReady() == 0U)
       {
         (void)ScreenUart_Printf("please zero at center first\r\n");
       }
+      else if (Task6_PrintFireCalibrationPoint((uint8_t)fire_point_id) == 0U)
+      {
+        (void)ScreenUart_Printf("t6 mark fire%d failed\r\n", fire_point_id);
+      }
+      continue;
+    }
+
+    if (strcmp(line, "t6_run") == 0)
+    {
+      if (Task6_IsCenterZeroReady() == 0U)
+      {
+        (void)ScreenUart_Printf("please zero at center first\r\n");
+      }
+      else if (Task6_StartPatrol() == 0U)
+      {
+        (void)ScreenUart_Printf("t6 run start failed\r\n");
+      }
       else
       {
-        if (Task3_StartGoto((task3_point_id_t)target) != 0U)
-        {
-          (void)ScreenUart_Printf("goto p%u(%s) start\r\n",
-                                  (unsigned int)target,
-                                  App_PointName(target));
-        }
-        else
-        {
-          (void)ScreenUart_Printf("goto p%u(%s) failed\r\n",
-                                  (unsigned int)target,
-                                  App_PointName(target));
-        }
+        App_PrintTask6CurrentStep();
       }
+      continue;
+    }
+
+    if (strcmp(line, "t6_stop") == 0)
+    {
+      Task6_Stop();
+      (void)ScreenUart_Printf("t6 stop ok\r\n");
+      continue;
+    }
+
+    if (strcmp(line, "t6_stat") == 0)
+    {
+      App_PrintPlatformState();
+      continue;
+    }
+
+    if (strcmp(line, "t6_list") == 0)
+    {
+      App_PrintTask5Table();
       continue;
     }
 
@@ -254,35 +360,49 @@ static void App_HandleScreenCommands(void)
 static void App_MainProcess(void)
 {
   const uint32_t now_ms = HAL_GetTick();
-  static task3_state_t s_last_task3_state = TASK3_STATE_IDLE;
+  static task6_state_t s_last_task6_state = TASK6_STATE_IDLE;
+  static uint8_t s_last_step_index = 0U;
 
   App_HandleScreenCommands();
 
   if ((now_ms - s_last_drive_update_ms) >= 10U)
   {
     s_last_drive_update_ms = now_ms;
-    TASK3();
-    if (Task3_IsBusy() == 0U)
+    TASK6();
+    if (Task6_IsBusy() == 0U)
     {
       (void)AppPlatformDrive_UpdateStateOnly(&s_platform_drive, 0.010f);
     }
   }
 
-  if ((s_last_task3_state == TASK3_STATE_RUNNING) && (Task3_GetState() == TASK3_STATE_FINISHED))
+  if ((Task6_GetState() == TASK6_STATE_RUNNING) &&
+      (Task6_GetCurrentPathIndex() != s_last_step_index))
   {
-    (void)ScreenUart_Printf("goto p%u(%s) reached\r\n",
-                            (unsigned int)Task3_GetCurrentTarget(),
-                            App_PointName((uint8_t)Task3_GetCurrentTarget()));
+    App_PrintTask6CurrentStep();
   }
 
-  if ((s_last_task3_state == TASK3_STATE_RUNNING) && (Task3_GetState() == TASK3_STATE_ERROR))
+  if ((s_last_task6_state != TASK6_STATE_FIRE_ALARM) && (Task6_GetState() == TASK6_STATE_FIRE_ALARM))
   {
-    (void)ScreenUart_Printf("goto p%u(%s) failed\r\n",
-                            (unsigned int)Task3_GetCurrentTarget(),
-                            App_PointName((uint8_t)Task3_GetCurrentTarget()));
+    (void)ScreenUart_Printf("t6 fire alarm start\r\n");
   }
 
-  s_last_task3_state = Task3_GetState();
+  if ((s_last_task6_state == TASK6_STATE_FIRE_ALARM) && (Task6_GetState() == TASK6_STATE_RUNNING))
+  {
+    (void)ScreenUart_Printf("t6 fire alarm done, continue\r\n");
+  }
+
+  if ((s_last_task6_state != TASK6_STATE_FINISHED) && (Task6_GetState() == TASK6_STATE_FINISHED))
+  {
+    (void)ScreenUart_Printf("t6 patrol finished\r\n");
+  }
+
+  if ((s_last_task6_state != TASK6_STATE_ERROR) && (Task6_GetState() == TASK6_STATE_ERROR))
+  {
+    (void)ScreenUart_Printf("t6 run failed\r\n");
+  }
+
+  s_last_task6_state = Task6_GetState();
+  s_last_step_index = Task6_GetCurrentPathIndex();
 }
 /* USER CODE END 0 */
 
@@ -328,6 +448,7 @@ int main(void)
   /* USER CODE BEGIN 2 */
   (void)CameraUart_Init();
   (void)ScreenUart_Init();
+  AlarmService_Init();
   (void)ScreenUart_SendString("boot uart5 ok\r\n");
   AppPlatformDrive_GetDefaultConfig(&s_platform_config);
   if (AppPlatformDrive_Init(&s_platform_drive, &s_platform_config) != APP_PLATFORM_DRIVE_STATUS_OK)
@@ -336,7 +457,7 @@ int main(void)
   }
   else
   {
-    Task3_Init(&s_platform_drive);
+    Task6_Init(&s_platform_drive);
     (void)ScreenUart_Printf("platform init ok\r\n");
     App_PrintHelp();
   }
