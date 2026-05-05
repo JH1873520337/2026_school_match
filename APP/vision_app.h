@@ -5,6 +5,8 @@
 extern "C" {
 #endif
 
+#include "usart.h"
+
 #include <stdint.h>
 
 #define VISION_APP_TARGET_NONE          ((uint8_t)0U)
@@ -69,6 +71,7 @@ void VisionApp_Init(void);
  * 建议在主循环或任务中以 100~200Hz 调用。
  */
 void VisionApp_Process(void);
+void VisionApp_RxCpltCallback(UART_HandleTypeDef *huart);
 
 /**
  * @brief 获取最近一次发布到 APP 层的整帧视觉数据。

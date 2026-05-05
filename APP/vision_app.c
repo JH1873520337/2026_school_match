@@ -23,7 +23,7 @@ static uint8_t s_rx_byte = 0U;
 static uint8_t s_ring[VISION_RING_SIZE];
 static volatile uint16_t s_ring_wr = 0U;
 static uint16_t s_ring_rd = 0U;
-static vision_target_t s_target;
+static vision_frame_t s_frame;
 static volatile uint8_t s_frame_ready = 0U;
 
 static uint8_t VisionProto_Crc8(const uint8_t *buf, uint16_t len)
@@ -73,6 +73,8 @@ static void VisionApp_ParseByte(uint8_t byte)
             if (index >= VISION_PROTO_LEN)
             {
                 uint8_t crc;
+                vision_target_t parsed_target;
+                uint8_t target_kind;
 
                 state = VISION_STATE_IDLE;
                 crc = VisionProto_Crc8(&frame[2U], 16U);
@@ -81,19 +83,31 @@ static void VisionApp_ParseByte(uint8_t byte)
                     break;
                 }
 
-                s_target.seq = frame[2];
-                s_target.target_kind = frame[3];
-                s_target.valid = (frame[4] & 0x01U) ? 1U : 0U;
-                s_target.stale = (frame[4] & 0x02U) ? 1U : 0U;
-                s_target.quality = frame[5];
-                s_target.cx = (uint16_t)frame[6] | ((uint16_t)frame[7] << 8);
-                s_target.cy = (uint16_t)frame[8] | ((uint16_t)frame[9] << 8);
-                s_target.ex = (int16_t)((uint16_t)frame[10] | ((uint16_t)frame[11] << 8));
-                s_target.ey = (int16_t)((uint16_t)frame[12] | ((uint16_t)frame[13] << 8));
-                s_target.area = (uint16_t)frame[14] | ((uint16_t)frame[15] << 8);
-                s_target.angle = (int16_t)((uint16_t)frame[16] | ((uint16_t)frame[17] << 8));
-                s_target.crc_ok = 1U;
-                s_target.frame_count++;
+                (void)memset(&parsed_target, 0, sizeof(parsed_target));
+                target_kind = frame[3];
+                parsed_target.valid = (frame[4] & 0x01U) ? 1U : 0U;
+                parsed_target.stale = (frame[4] & 0x02U) ? 1U : 0U;
+                parsed_target.quality = frame[5];
+                parsed_target.cx = (uint16_t)frame[6] | ((uint16_t)frame[7] << 8);
+                parsed_target.cy = (uint16_t)frame[8] | ((uint16_t)frame[9] << 8);
+                parsed_target.ex = (int16_t)((uint16_t)frame[10] | ((uint16_t)frame[11] << 8));
+                parsed_target.ey = (int16_t)((uint16_t)frame[12] | ((uint16_t)frame[13] << 8));
+                parsed_target.area = (uint16_t)frame[14] | ((uint16_t)frame[15] << 8);
+
+                s_frame.online = 1U;
+                s_frame.sequence = frame[2];
+                s_frame.crc_ok = 1U;
+                s_frame.frame_count++;
+
+                if (target_kind == VISION_APP_TARGET_ORANGE_CIRCLE)
+                {
+                    s_frame.orange = parsed_target;
+                }
+                else if (target_kind == VISION_APP_TARGET_FLAME)
+                {
+                    s_frame.flame = parsed_target;
+                }
+
                 s_frame_ready = 1U;
             }
             break;
@@ -106,7 +120,7 @@ static void VisionApp_ParseByte(uint8_t byte)
 
 void VisionApp_Init(void)
 {
-    (void)memset(&s_target, 0, sizeof(s_target));
+    (void)memset(&s_frame, 0, sizeof(s_frame));
     s_ring_wr = 0U;
     s_ring_rd = 0U;
     s_frame_ready = 0U;
@@ -126,9 +140,19 @@ void VisionApp_Process(void)
     }
 }
 
-const vision_target_t *VisionApp_GetTarget(void)
+const vision_frame_t *VisionApp_GetFrame(void)
 {
-    return &s_target;
+    return &s_frame;
+}
+
+const vision_target_t *VisionApp_GetOrangeTarget(void)
+{
+    return &s_frame.orange;
+}
+
+const vision_target_t *VisionApp_GetFlameTarget(void)
+{
+    return &s_frame.flame;
 }
 
 uint8_t VisionApp_IsNewFrame(void)
@@ -138,7 +162,7 @@ uint8_t VisionApp_IsNewFrame(void)
     return ready;
 }
 
-void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+void VisionApp_RxCpltCallback(UART_HandleTypeDef *huart)
 {
     if (huart == &huart4)
     {
@@ -152,10 +176,5 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 
         HAL_UART_Receive_IT(&huart4, &s_rx_byte, 1U);
         return;
-    }
-
-    if (huart == &huart5)
-    {
-        ScreenUart_RxCpltCallback(huart);
     }
 }
