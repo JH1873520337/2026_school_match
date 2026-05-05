@@ -1,15 +1,26 @@
 import time
 
+import image
 import sensor
 from pyb import LED
 from pyb import UART
 from pyb import millis
 
+try:
+    import display
+except ImportError:
+    display = None
+
+try:
+    import lcd
+except ImportError:
+    lcd = None
+
 
 class config:
     # OpenMV 图像采集、识别、串口输出的全局配置。
     # 图像分辨率，QQVGA 计算量更小，适合高帧率识别。
-    FRAME_SIZE = "QQVGA"
+    FRAME_SIZE = "QQQVGA"
     # 像素格式，RGB565 便于做颜色阈值检测。
     PIXFORMAT = "RGB565"
 
@@ -40,6 +51,23 @@ class config:
     # 串口发送周期，单位 ms。
     SEND_FRAME_INTERVAL_MS = 30
 
+    # 是否把当前识别画面同步显示到外接屏幕。
+    DISPLAY_ENABLE = True
+    # 优先尝试的显示后端：AUTO / RGB / SPI。
+    # OpenMV 官方 SPI LCD 建议固定为 SPI，避免先探测 RGB 屏浪费时间。
+    DISPLAY_PREFERRED = "SPI"
+    # RGB 屏输出方向；竖屏安装时改成 True。
+    DISPLAY_PORTRAIT = False
+    # 屏幕刷新率，过高会增加带宽占用。
+    DISPLAY_REFRESH = 30
+    # 背光亮度百分比，0~100。
+    DISPLAY_BACKLIGHT_PERCENT = 100
+    # SPI 屏参数；只有回退到 SPI 显示时才会使用。
+    DISPLAY_SPI_WIDTH = 128
+    DISPLAY_SPI_HEIGHT = 160
+    DISPLAY_SPI_BGR = False
+    DISPLAY_SPI_BYTE_SWAP = False
+
     # 目标短暂丢失后继续保留的时间，单位 ms。
     TRACK_HOLD_MS = 120
     # 平滑系数，越大越跟随新值，越小越平稳。
@@ -49,6 +77,11 @@ class config:
     ORANGE_THRESHOLDS = [
     (20, 75, 18, 65, 20, 75),
     (28, 40, 12, 61, -8, 47),
+    (28, 49, -1, 26, 26, 37),
+    (48, 70, 2, 24, 8, 38),
+    (73, 81, 6, 23, 13, 34),
+    (72, 87, 1, 18, 13, 53),
+    (18, 82, 3, 32, 1, 20),
     ]
 
     # 火焰的 LAB 阈值，可同时覆盖不同亮度和色温的火焰区域。
@@ -57,6 +90,7 @@ class config:
         (35, 100, -10, 30, 20, 80),
         (17, 35, 16, 39, 0, 53),
         (32, 53, 29, 64, 52, -20),
+        (21, 39, 6, 26, -5, 44),
     ]
 
     # find_blobs 的像素数门限，过小的色块直接忽略。
@@ -81,8 +115,29 @@ class config:
     ORANGE_ROUNDNESS_MIN = 0.78
     # 圆点内部亮度标准差上限，过于斑驳的暖色块更像火焰。
     ORANGE_L_STDDEV_MAX = 30
+    # 圆点上被激光笔打到时，允许更高一点的亮度起伏，但仍限制在可控范围内。
+    ORANGE_L_STDDEV_WITH_LASER_MAX = 46
     # 圆点和上一帧形状越接近，越倾向继续判成圆点。
     ORANGE_STABLE_BONUS_BASE = 0.60
+    # 圆点平均 b 值需要保持足够偏黄橙，避免纯红激光点混入。
+    ORANGE_WARM_SCORE_MIN = 0.34
+    # 只有足够大、足够圆、整体仍偏橙的候选，才放宽激光干扰下的纹理限制。
+    ORANGE_LASER_TOLERANT_AREA = 180
+    ORANGE_LASER_TOLERANT_CIRCLE_SCORE = 0.82
+    ORANGE_LASER_TOLERANT_WARM_SCORE = 0.55
+    # 上一帧已经确认是圆点时，如果当前位置突然被判成“近圆的火焰块”，优先拉回圆点。
+    ORANGE_HISTORY_RECLASSIFY_DISTANCE = 24
+    ORANGE_HISTORY_RECLASSIFY_AREA_MIN_RATIO = 0.45
+    ORANGE_HISTORY_RECLASSIFY_AREA_MAX_RATIO = 2.80
+    ORANGE_HISTORY_RECLASSIFY_CIRCLE_SCORE = 0.68
+    ORANGE_HISTORY_RECLASSIFY_WARM_SCORE = 0.10
+    # 平台快速移动时，首帧看到圆点可能已经被激光染红；此时只要整体仍明显更像圆实体，
+    # 也要优先按圆点处理，避免还没建立历史就被火焰分支抢走。
+    ORANGE_RED_CIRCLE_AREA_MIN = 150
+    ORANGE_RED_CIRCLE_CIRCLE_SCORE = 0.72
+    ORANGE_RED_CIRCLE_DENSITY_MIN = 0.52
+    ORANGE_RED_CIRCLE_ROUNDNESS_MIN = 0.55
+    ORANGE_RED_CIRCLE_TEXTURE_MAX = 0.42
 
     # 火焰检测的像素数门限。
     FLAME_PIXELS_THRESHOLD = 80
@@ -113,6 +168,25 @@ class config:
     FLAME_L_STDDEV_MIN = 8
     # 火焰默认保留少量动态分，避免首次出现时因为没有历史而被压制。
     FLAME_FLICKER_BASE = 0.25
+    # 火焰整体仍应带一定黄橙分量；太偏纯红且面积又小，更像激光点。
+    FLAME_WARM_SCORE_MIN = 0.12
+    FLAME_LASER_REJECT_AREA_MAX = 260
+
+    # 红色激光点常表现为：面积较小、很亮、a 分量高、b 分量不高、形状偏紧凑。
+    LASER_AREA_MAX = 260
+    LASER_MAX_WIDTH = 20
+    LASER_MAX_HEIGHT = 20
+    LASER_ASPECT_MIN = 0.40
+    LASER_ASPECT_MAX = 2.10
+    LASER_DENSITY_MIN = 0.30
+    LASER_ROUNDNESS_MIN = 0.45
+    LASER_L_MEAN_MIN = 45
+    LASER_A_MEAN_MIN = 26
+    LASER_B_MEAN_MAX = 18
+
+    # 用 blob 区域平均 b 值估计“偏黄橙”程度；激光点通常 b 值明显低于橙色目标和火焰。
+    WARM_B_MEAN_MIN = 0
+    WARM_B_MEAN_MAX = 32
 
     # 两类目标中心过近时，视为同一暖色物体的冲突候选。
     TARGET_CONFLICT_DISTANCE = 18
@@ -304,6 +378,111 @@ class VisionUart:
         self._seq = (self._seq + 1) & 0xFF
 
 
+class FrameDisplay:
+    # 封装外接屏显示，优先适配 H7 Plus 常用的 RGB 屏，失败后再回退到 SPI/lcd 接口。
+    def __init__(self):
+        self._driver = None
+        self._backend = None
+        self._hint = image.CENTER | image.SCALE_ASPECT_KEEP
+        if config.DISPLAY_ENABLE:
+            self._init_display()
+
+    def _set_backlight(self):
+        level = max(0, min(100, int(config.DISPLAY_BACKLIGHT_PERCENT)))
+
+        if self._backend == "display" and hasattr(self._driver, "backlight"):
+            self._driver.backlight(level)
+            return
+
+        if self._backend == "lcd":
+            lcd.set_backlight((level * 255) // 100)
+
+    def _try_rgb_display(self):
+        if display is None:
+            return False
+
+        self._driver = display.RGBDisplay(refresh=config.DISPLAY_REFRESH,
+                                          portrait=config.DISPLAY_PORTRAIT)
+        self._backend = "display"
+        self._set_backlight()
+        return True
+
+    def _try_spi_display(self):
+        if display is None:
+            return False
+
+        self._driver = display.SPIDisplay(width=config.DISPLAY_SPI_WIDTH,
+                                          height=config.DISPLAY_SPI_HEIGHT,
+                                          refresh=config.DISPLAY_REFRESH,
+                                          bgr=config.DISPLAY_SPI_BGR,
+                                          byte_swap=config.DISPLAY_SPI_BYTE_SWAP)
+        self._backend = "display"
+        self._set_backlight()
+        return True
+
+    def _try_lcd_display(self):
+        if lcd is None:
+            return False
+
+        lcd.init(lcd.LCD_DISPLAY, refresh=config.DISPLAY_REFRESH)
+        self._driver = lcd
+        self._backend = "lcd"
+        self._set_backlight()
+        return True
+
+    def _try_lcd_spi(self):
+        if lcd is None:
+            return False
+
+        lcd.init(lcd.LCD_SHIELD,
+                 width=config.DISPLAY_SPI_WIDTH,
+                 height=config.DISPLAY_SPI_HEIGHT,
+                 refresh=config.DISPLAY_REFRESH,
+                 bgr=config.DISPLAY_SPI_BGR,
+                 byte_reverse=config.DISPLAY_SPI_BYTE_SWAP)
+        self._driver = lcd
+        self._backend = "lcd"
+        self._set_backlight()
+        return True
+
+    def _init_display(self):
+        preferred = config.DISPLAY_PREFERRED
+        if preferred == "RGB":
+            attempts = (self._try_rgb_display, self._try_lcd_display)
+        elif preferred == "SPI":
+            attempts = (self._try_spi_display, self._try_lcd_spi)
+        else:
+            attempts = (self._try_rgb_display,
+                        self._try_lcd_display,
+                        self._try_spi_display,
+                        self._try_lcd_spi)
+
+        for attempt in attempts:
+            try:
+                if attempt():
+                    return
+            except Exception:
+                self._driver = None
+                self._backend = None
+
+    def show(self, img):
+        if self._driver is None:
+            return
+
+        try:
+            if self._backend == "display":
+                self._driver.write(img, hint=self._hint)
+            else:
+                self._driver.display(img,
+                                     x_size=self._driver.width(),
+                                     y_size=self._driver.height(),
+                                     hint=self._hint)
+        except Exception:
+            # 显示异常时静默降级，避免影响识别和串口发送主流程。
+            self._driver = None
+            self._backend = None
+
+
 def _lerp_int(old_value, new_value, alpha):
     # 线性插值，用于降低检测结果帧间抖动。
     return int(old_value + alpha * (new_value - old_value))
@@ -313,6 +492,16 @@ class TargetTracker:
     def __init__(self):
         self._target = invalid_target()
         self._last_update_ms = 0
+
+    def latest(self, now_ms, max_age_ms=None):
+        # 读取最近一次确认的目标；超过允许年龄后返回无效，避免拿过期历史做重分类。
+        if self._target.valid:
+            if max_age_ms is not None and (now_ms - self._last_update_ms) > max_age_ms:
+                return invalid_target()
+            latest_target = self._target.copy()
+            latest_target.stale = False
+            return latest_target
+        return invalid_target()
 
     def update(self, new_target, now_ms):
         if new_target is not None and new_target.valid:
@@ -461,6 +650,32 @@ def _safe_l_stdev(img, blob):
         return 0.0
 
 
+def _safe_blob_stats(img, blob):
+    # 统一读取候选框统计量，便于同时使用均值和标准差做判别。
+    try:
+        return img.get_statistics(roi=blob.rect())
+    except Exception:
+        return None
+
+
+def _stats_l_stdev(stats):
+    if stats is None:
+        return 0.0
+    try:
+        return float(stats.l_stdev())
+    except Exception:
+        return 0.0
+
+
+def _stats_lab_means(stats):
+    if stats is None:
+        return 0.0, 0.0, 0.0
+    try:
+        return float(stats.l_mean()), float(stats.a_mean()), float(stats.b_mean())
+    except Exception:
+        return 0.0, 0.0, 0.0
+
+
 def _circle_shape_score(aspect, density, elongation, roundness):
     # 将“像圆”的程度压成 0 到 1，便于和纹理、时序信息一起加权。
     aspect_score = 1.0 - min(1.0, abs(1.0 - aspect))
@@ -472,6 +687,35 @@ def _circle_shape_score(aspect, density, elongation, roundness):
 def _texture_score(l_stdev):
     # 亮度标准差越大，内部纹理越复杂，更像真实火焰。
     return max(0.0, min(1.0, float(l_stdev) / 32.0))
+
+
+def _warm_b_score(b_mean):
+    # b 值越高越偏黄橙，越低越偏纯红；可用来抑制红激光干扰。
+    span = float(config.WARM_B_MEAN_MAX - config.WARM_B_MEAN_MIN)
+    if span <= 0:
+        return 0.0
+    return max(0.0, min(1.0, float(b_mean - config.WARM_B_MEAN_MIN) / span))
+
+
+def _looks_like_laser_spot(area, w, h, aspect, density, roundness, l_mean, a_mean, b_mean):
+    # 红色激光点通常是小而亮、偏纯红、外形较紧凑的高光斑。
+    if area <= 0 or area > config.LASER_AREA_MAX:
+        return False
+    if w > config.LASER_MAX_WIDTH or h > config.LASER_MAX_HEIGHT:
+        return False
+    if aspect < config.LASER_ASPECT_MIN or aspect > config.LASER_ASPECT_MAX:
+        return False
+    if density < config.LASER_DENSITY_MIN:
+        return False
+    if roundness < config.LASER_ROUNDNESS_MIN:
+        return False
+    if l_mean < config.LASER_L_MEAN_MIN:
+        return False
+    if a_mean < config.LASER_A_MEAN_MIN:
+        return False
+    if b_mean > config.LASER_B_MEAN_MAX:
+        return False
+    return True
 
 
 def _feature_delta(current_metrics, last_metrics):
@@ -494,6 +738,121 @@ def _targets_conflict(target_a, target_b):
     if abs(target_a.cy - target_b.cy) > config.TARGET_CONFLICT_DISTANCE:
         return False
     return True
+
+
+def _area_ratio(reference_area, current_area):
+    # 返回当前面积相对上一帧面积的比例，便于按配置直接判断上下限。
+    if reference_area <= 0 or current_area <= 0:
+        return 999.0
+    return float(current_area) / float(reference_area)
+
+
+def _should_reclassify_flame_as_orange(last_orange_target, flame_target, flame_metrics):
+    # 当上一帧这里就是圆点，而本帧只是被激光照红，优先保持圆点身份。
+    if (not last_orange_target.valid) or (not flame_target.valid) or (flame_metrics is None):
+        return False
+
+    if abs(last_orange_target.cx - flame_target.cx) > config.ORANGE_HISTORY_RECLASSIFY_DISTANCE:
+        return False
+    if abs(last_orange_target.cy - flame_target.cy) > config.ORANGE_HISTORY_RECLASSIFY_DISTANCE:
+        return False
+
+    area_ratio = _area_ratio(last_orange_target.area, flame_target.area)
+    if area_ratio < config.ORANGE_HISTORY_RECLASSIFY_AREA_MIN_RATIO:
+        return False
+    if area_ratio > config.ORANGE_HISTORY_RECLASSIFY_AREA_MAX_RATIO:
+        return False
+
+    circle_score = flame_metrics.get("circle_score", 0.0)
+    warm_score = flame_metrics.get("warm_score", 0.0)
+    if circle_score < config.ORANGE_HISTORY_RECLASSIFY_CIRCLE_SCORE:
+        return False
+    if warm_score < config.ORANGE_HISTORY_RECLASSIFY_WARM_SCORE:
+        return False
+    return True
+
+
+def _reclassify_flame_to_orange(last_orange_target, flame_target, flame_metrics):
+    # 保留当前帧的位置和面积，但把类别拉回圆点，避免整颗圆点翻成火焰。
+    circle_score = flame_metrics.get("circle_score", 0.0)
+    warm_score = flame_metrics.get("warm_score", 0.0)
+    quality = int(min(100,
+                      max(flame_target.quality,
+                          40 + circle_score * 28 + warm_score * 18)))
+    return VisionTarget(kind=TARGET_ORANGE_CIRCLE,
+                        valid=True,
+                        cx=flame_target.cx,
+                        cy=flame_target.cy,
+                        ex=flame_target.ex,
+                        ey=flame_target.ey,
+                        area=flame_target.area,
+                        angle=last_orange_target.angle,
+                        quality=quality,
+                        stale=False,
+                        box_w=flame_target.box_w,
+                        box_h=flame_target.box_h)
+
+
+def _should_promote_flame_to_orange(flame_target, flame_metrics):
+    # 没有历史圆点时，也允许把“首帧就被激光染红的圆”从火焰候选里拉回圆点。
+    if (not flame_target.valid) or (flame_metrics is None):
+        return False
+
+    area = flame_target.area
+    density = flame_metrics.get("density", 0.0)
+    roundness = flame_metrics.get("roundness", 0.0)
+    circle_score = flame_metrics.get("circle_score", 0.0)
+    texture_score = flame_metrics.get("texture_score", 1.0)
+
+    if area < config.ORANGE_RED_CIRCLE_AREA_MIN:
+        return False
+    if density < config.ORANGE_RED_CIRCLE_DENSITY_MIN:
+        return False
+    if roundness < config.ORANGE_RED_CIRCLE_ROUNDNESS_MIN:
+        return False
+    if circle_score < config.ORANGE_RED_CIRCLE_CIRCLE_SCORE:
+        return False
+    if texture_score > config.ORANGE_RED_CIRCLE_TEXTURE_MAX:
+        return False
+    return True
+
+
+def _promote_flame_to_orange(flame_target, flame_metrics):
+    circle_score = flame_metrics.get("circle_score", 0.0)
+    density = flame_metrics.get("density", 0.0)
+    roundness = flame_metrics.get("roundness", 0.0)
+    texture_score = flame_metrics.get("texture_score", 1.0)
+    warm_score = flame_metrics.get("warm_score", 0.0)
+    uniformity_score = max(0.0, 1.0 - texture_score)
+    quality = int(min(100,
+                      max(flame_target.quality,
+                          density * 24 + roundness * 18 + circle_score * 24 +
+                          uniformity_score * 18 + warm_score * 6)))
+    return VisionTarget(kind=TARGET_ORANGE_CIRCLE,
+                        valid=True,
+                        cx=flame_target.cx,
+                        cy=flame_target.cy,
+                        ex=flame_target.ex,
+                        ey=flame_target.ey,
+                        area=flame_target.area,
+                        angle=0,
+                        quality=quality,
+                        stale=False,
+                        box_w=flame_target.box_w,
+                        box_h=flame_target.box_h)
+
+
+def _orange_metrics_from_flame_metrics(flame_metrics):
+    return {
+        "aspect": flame_metrics.get("aspect", 1.0),
+        "density": flame_metrics.get("density", 0.0),
+        "elongation": flame_metrics.get("elongation", 1.0),
+        "roundness": flame_metrics.get("roundness", 0.0),
+        "l_stdev": flame_metrics.get("l_stdev", 0.0),
+        "circle_score": flame_metrics.get("circle_score", 0.0),
+        "uniformity_score": max(0.0, 1.0 - flame_metrics.get("texture_score", 1.0)),
+        "warm_score": flame_metrics.get("warm_score", 0.0),
+    }
 
 
 def _resolve_target_conflict(orange_target, orange_metrics, flame_target, flame_metrics):
@@ -578,12 +937,25 @@ class OrangeCircleDetector:
             if not _looks_like_orange_circle_shape(aspect, density, elongation, roundness):
                 continue
 
-            l_stdev = _safe_l_stdev(img, blob)
-            if l_stdev > config.ORANGE_L_STDDEV_MAX:
-                continue
-
             area = _blob_area(blob)
             circle_score = _circle_shape_score(aspect, density, elongation, roundness)
+            stats = _safe_blob_stats(img, blob)
+            l_stdev = _stats_l_stdev(stats)
+            l_mean, a_mean, b_mean = _stats_lab_means(stats)
+            warm_score = _warm_b_score(b_mean)
+            if warm_score < config.ORANGE_WARM_SCORE_MIN:
+                continue
+            if _looks_like_laser_spot(area, w, h, aspect, density, roundness, l_mean, a_mean, b_mean):
+                continue
+
+            allowed_l_stdev = config.ORANGE_L_STDDEV_MAX
+            if (area >= config.ORANGE_LASER_TOLERANT_AREA and
+                    circle_score >= config.ORANGE_LASER_TOLERANT_CIRCLE_SCORE and
+                    warm_score >= config.ORANGE_LASER_TOLERANT_WARM_SCORE):
+                allowed_l_stdev = config.ORANGE_L_STDDEV_WITH_LASER_MAX
+            if l_stdev > allowed_l_stdev:
+                continue
+
             uniformity_score = 1.0 - _texture_score(l_stdev)
             metrics = {
                 "aspect": aspect,
@@ -591,8 +963,12 @@ class OrangeCircleDetector:
                 "elongation": elongation,
                 "roundness": roundness,
                 "l_stdev": l_stdev,
+                "l_mean": l_mean,
+                "a_mean": a_mean,
+                "b_mean": b_mean,
                 "circle_score": circle_score,
                 "uniformity_score": uniformity_score,
+                "warm_score": warm_score,
             }
 
             stability_score = config.ORANGE_STABLE_BONUS_BASE
@@ -601,12 +977,13 @@ class OrangeCircleDetector:
 
             # 综合面积、密度、接近圆形程度选出最优候选。
             aspect_score = 1.0 - abs(1.0 - aspect)
-            score = int(area * (0.30 + density) * (0.35 + aspect_score) * (0.30 + circle_score) * (0.30 + uniformity_score) * (0.35 + stability_score))
+            score = int(area * (0.30 + density) * (0.35 + aspect_score) * (0.30 + circle_score) *
+                        (0.30 + uniformity_score) * (0.35 + stability_score) * (0.35 + warm_score))
             quality = int(min(100,
                               max(0,
                                   density * 26 + aspect_score * 18 + roundness * 18 +
                                   (1.0 - elongation) * 12 + circle_score * 12 +
-                                  uniformity_score * 8 + stability_score * 6)))
+                                  uniformity_score * 8 + stability_score * 6 + warm_score * 8)))
 
             target = VisionTarget(kind=TARGET_ORANGE_CIRCLE,
                                   valid=True,
@@ -682,11 +1059,17 @@ class FlameDetector:
             if _looks_like_orange_circle_shape(aspect, density, elongation, roundness):
                 continue
 
-            l_stdev = _safe_l_stdev(img, blob)
+            area = _blob_area(blob)
+            stats = _safe_blob_stats(img, blob)
+            l_stdev = _stats_l_stdev(stats)
+            l_mean, a_mean, b_mean = _stats_lab_means(stats)
+            warm_score = _warm_b_score(b_mean)
+            if (_looks_like_laser_spot(area, w, h, aspect, density, roundness, l_mean, a_mean, b_mean) or
+                    (area <= config.FLAME_LASER_REJECT_AREA_MAX and warm_score < config.FLAME_WARM_SCORE_MIN)):
+                continue
             if l_stdev < config.FLAME_L_STDDEV_MIN:
                 continue
 
-            area = _blob_area(blob)
             texture_score = _texture_score(l_stdev)
             metrics = {
                 "aspect": aspect,
@@ -694,9 +1077,13 @@ class FlameDetector:
                 "elongation": elongation,
                 "roundness": roundness,
                 "l_stdev": l_stdev,
+                "l_mean": l_mean,
+                "a_mean": a_mean,
+                "b_mean": b_mean,
                 "circle_score": _circle_shape_score(aspect, density, elongation, roundness),
                 "texture_score": texture_score,
                 "flicker_score": config.FLAME_FLICKER_BASE,
+                "warm_score": warm_score,
             }
 
             flicker_score = config.FLAME_FLICKER_BASE
@@ -707,11 +1094,12 @@ class FlameDetector:
 
             # 结合面积、暖色形状特征和密度来选最像火焰的目标。
             warm_shape_score = 1.0 - min(1.0, abs(0.75 - aspect))
-            score = int(area * (0.35 + warm_shape_score) * (0.45 + density) * (0.35 + texture_score) * (0.30 + flicker_score))
+            score = int(area * (0.35 + warm_shape_score) * (0.45 + density) *
+                        (0.35 + texture_score) * (0.30 + flicker_score) * (0.20 + warm_score))
             quality = int(min(100,
                               max(0,
                                   density * 32 + warm_shape_score * 20 + (1.0 - elongation) * 12 +
-                                  texture_score * 20 + flicker_score * 16)))
+                                  texture_score * 20 + flicker_score * 16 + warm_score * 10)))
 
             target = VisionTarget(kind=TARGET_FLAME,
                                   valid=True,
@@ -805,6 +1193,7 @@ def main():
     orange_tracker = TargetTracker()
     flame_tracker = ConfirmedTargetTracker(config.FLAME_CONFIRM_FRAMES,
                                            config.FLAME_CONFIRM_DISTANCE)
+    frame_display = FrameDisplay()
     uart = VisionUart()
     last_send_ms = 0
 
@@ -812,10 +1201,21 @@ def main():
         clock.tick()
         img = sensor.snapshot()
         now_ms = millis()
+        last_orange_target = orange_tracker.latest(now_ms, config.TRACK_HOLD_MS)
 
         # 每帧同时检测两类目标，并在进入跟踪前做一次冲突消解。
         orange_raw, orange_metrics = orange_detector.detect(img)
         flame_raw, flame_metrics = flame_detector.detect(img)
+        if (not orange_raw.valid) and _should_reclassify_flame_as_orange(last_orange_target, flame_raw, flame_metrics):
+            orange_raw = _reclassify_flame_to_orange(last_orange_target, flame_raw, flame_metrics)
+            orange_metrics = _orange_metrics_from_flame_metrics(flame_metrics)
+            flame_raw = invalid_target()
+            flame_metrics = None
+        elif (not orange_raw.valid) and _should_promote_flame_to_orange(flame_raw, flame_metrics):
+            orange_raw = _promote_flame_to_orange(flame_raw, flame_metrics)
+            orange_metrics = _orange_metrics_from_flame_metrics(flame_metrics)
+            flame_raw = invalid_target()
+            flame_metrics = None
         orange_raw, flame_raw = _resolve_target_conflict(orange_raw, orange_metrics, flame_raw, flame_metrics)
         _draw_target_debug(img, orange_raw, flame_raw)
 
@@ -823,6 +1223,7 @@ def main():
         flame_target = flame_tracker.update(flame_raw, now_ms)
 
         _draw_status(img, orange_target, flame_target, clock.fps())
+        frame_display.show(img)
 
         if (now_ms - last_send_ms) >= config.SEND_FRAME_INTERVAL_MS:
             # 无目标时 flags 会为 0x00，两个目标的数据区保持为 0。
