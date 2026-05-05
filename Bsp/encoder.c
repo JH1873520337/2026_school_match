@@ -3,14 +3,15 @@
 typedef struct
 {
     TIM_HandleTypeDef *htim;
+    int8_t direction;
 } encoder_hw_t;
 
 static const encoder_hw_t s_encoder_hw[ENCODER_COUNT] =
 {
-    {&htim1},
-    {&htim2},
-    {&htim4},
-    {&htim5}
+    {&htim2, 1},
+    {&htim4,  -1},
+    {&htim5,  1},
+    {&htim1,  1}
 };
 
 static uint8_t s_encoder_ready = 0U;
@@ -109,7 +110,8 @@ encoder_status_t Encoder_GetCount(encoder_id_t encoder, int32_t *count)
         return status;
     }
 
-    *count = Encoder_ReadCounter(s_encoder_hw[encoder].htim);
+    *count = Encoder_ReadCounter(s_encoder_hw[encoder].htim) *
+             (int32_t)s_encoder_hw[encoder].direction;
     return ENCODER_STATUS_OK;
 }
 
@@ -129,7 +131,8 @@ encoder_status_t Encoder_SetCount(encoder_id_t encoder, int32_t count)
     }
 
     __HAL_TIM_SET_COUNTER(s_encoder_hw[encoder].htim,
-                          Encoder_WriteCounterValue(s_encoder_hw[encoder].htim, count));
+                          Encoder_WriteCounterValue(s_encoder_hw[encoder].htim,
+                                                    count * (int32_t)s_encoder_hw[encoder].direction));
     return ENCODER_STATUS_OK;
 }
 

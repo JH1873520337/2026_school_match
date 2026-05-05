@@ -5,6 +5,7 @@
 extern "C" {
 #endif
 
+#include "pid.h"
 #include "rope_platform_solver.h"
 
 #include <stdint.h>
@@ -30,12 +31,10 @@ typedef struct
 {
     rope_platform_solver_config_t solver_config;
     float motor_ff_gain[ROPE_PLATFORM_SOLVER_CABLE_COUNT];
-    float motor_kp[ROPE_PLATFORM_SOLVER_CABLE_COUNT];
-    float motor_ki[ROPE_PLATFORM_SOLVER_CABLE_COUNT];
-    float motor_i_limit[ROPE_PLATFORM_SOLVER_CABLE_COUNT];
+    pid_config_t motor_speed_pid[ROPE_PLATFORM_SOLVER_CABLE_COUNT];
+    int16_t pwm_min_effective[ROPE_PLATFORM_SOLVER_CABLE_COUNT];
     float max_platform_speed_mps;
     int16_t pwm_limit;
-    int16_t pwm_min_effective;
 } app_platform_drive_config_t;
 
 /**
@@ -47,7 +46,7 @@ typedef struct
     app_platform_drive_config_t config;
     float command_vx_mps;
     float command_vy_mps;
-    float motor_i_term[ROPE_PLATFORM_SOLVER_CABLE_COUNT];
+    pid_controller_t motor_speed_pid[ROPE_PLATFORM_SOLVER_CABLE_COUNT];
     int16_t motor_pwm[ROPE_PLATFORM_SOLVER_CABLE_COUNT];
     uint8_t initialized;
 } app_platform_drive_t;
@@ -81,6 +80,10 @@ app_platform_drive_status_t AppPlatformDrive_CalibrateCurrentPosition(app_platfo
                                                                       float known_x_m,
                                                                       float known_y_m);
 
+app_platform_drive_status_t AppPlatformDrive_SetCurrentPoseAsOrigin(app_platform_drive_t *drive,
+                                                                    float known_x_m,
+                                                                    float known_y_m);
+
 /**
  * @brief 周期调用的平台控制更新函数
  * @param drive 驱动对象指针
@@ -89,6 +92,14 @@ app_platform_drive_status_t AppPlatformDrive_CalibrateCurrentPosition(app_platfo
  * @note 该函数会完成：读编码器 -> 解算位置/速度 -> 速度分配 -> 计算 PWM -> 下发电机
  */
 app_platform_drive_status_t AppPlatformDrive_Update(app_platform_drive_t *drive, float dt_s);
+
+/**
+ * @brief 只更新编码器/绳长/平台位姿，不输出电机 PWM
+ * @param drive 驱动对象指针
+ * @param dt_s 控制周期，单位 s
+ * @return 驱动状态码
+ */
+app_platform_drive_status_t AppPlatformDrive_UpdateStateOnly(app_platform_drive_t *drive, float dt_s);
 
 /**
  * @brief 设置平台目标速度
@@ -146,6 +157,11 @@ app_platform_drive_status_t AppPlatformDrive_Stop(app_platform_drive_t *drive);
  * @return 解算器只读指针，失败时返回 NULL
  */
 const rope_platform_solver_t *AppPlatformDrive_GetSolver(const app_platform_drive_t *drive);
+
+app_platform_drive_status_t AppPlatformDrive_UpdateMotorSpeedLoop(
+    app_platform_drive_t *drive,
+    const float rope_speed_refs_mps[ROPE_PLATFORM_SOLVER_CABLE_COUNT],
+    float dt_s);
 
 #ifdef __cplusplus
 }

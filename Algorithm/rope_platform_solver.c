@@ -8,9 +8,6 @@
 #define ROPE_PLATFORM_PI    (3.14159265358979323846f)
 #endif
 
-/**
- * @brief 非线性迭代过程的中间结果
- */
 typedef struct
 {
     float guess_x_m;
@@ -18,11 +15,6 @@ typedef struct
     float residual_rms_m;
 } rope_platform_solver_iteration_t;
 
-/**
- * @brief 把 alpha 限制到 [0, 1]
- * @param alpha 待限制的低通滤波系数
- * @return 限制后的 alpha
- */
 static float RopePlatformSolver_ClampAlpha(float alpha)
 {
     if (alpha < 0.0f)
@@ -38,34 +30,22 @@ static float RopePlatformSolver_ClampAlpha(float alpha)
     return alpha;
 }
 
-/**
- * @brief 一阶低通滤波
- * @param input 当前输入值
- * @param previous 上一次输出值
- * @param alpha 滤波系数
- * @return 当前滤波输出值
- */
 static float RopePlatformSolver_LowPass(float input, float previous, float alpha)
 {
     alpha = RopePlatformSolver_ClampAlpha(alpha);
     return previous + (alpha * (input - previous));
 }
 
-/**
- * @brief 判断一个值是否为有限正数
- * @param value 待判断的数值
- * @return 1 表示有效，0 表示无效
- */
 static uint8_t RopePlatformSolver_IsFinitePositive(float value)
 {
     return (uint8_t)((isfinite(value) != 0) && (value > 0.0f));
 }
 
-/**
- * @brief 校验配置参数是否合法
- * @param config 配置结构体指针
- * @return 解算状态码
- */
+static uint8_t RopePlatformSolver_IsFiniteNonNegative(float value)
+{
+    return (uint8_t)((isfinite(value) != 0) && (value >= 0.0f));
+}
+
 static rope_platform_solver_status_t RopePlatformSolver_ValidateConfig(
     const rope_platform_solver_config_t *config)
 {
@@ -85,7 +65,7 @@ static rope_platform_solver_status_t RopePlatformSolver_ValidateConfig(
     {
         if (!RopePlatformSolver_IsFinitePositive(config->counts_per_rev[index]) ||
             !RopePlatformSolver_IsFinitePositive(config->drum_radius_m[index]) ||
-            !RopePlatformSolver_IsFinitePositive(config->anchor[index].z_m))
+            !RopePlatformSolver_IsFiniteNonNegative(config->anchor[index].z_m))
         {
             return ROPE_PLATFORM_SOLVER_STATUS_BAD_PARAM;
         }
@@ -104,13 +84,6 @@ static rope_platform_solver_status_t RopePlatformSolver_ValidateConfig(
     return ROPE_PLATFORM_SOLVER_STATUS_OK;
 }
 
-/**
- * @brief 计算平台到某个锚点的绳长
- * @param anchor 锚点坐标
- * @param platform_x_m 平台 x 坐标
- * @param platform_y_m 平台 y 坐标
- * @return 当前绳长，单位 m
- */
 static float RopePlatformSolver_DistanceToAnchor(const rope_anchor_point_t *anchor,
                                                  float platform_x_m,
                                                  float platform_y_m)
@@ -120,12 +93,18 @@ static float RopePlatformSolver_DistanceToAnchor(const rope_anchor_point_t *anch
     return sqrtf((dx * dx) + (dy * dy) + (anchor->z_m * anchor->z_m));
 }
 
-/**
- * @brief 根据编码器累计计数重建四根绳的绝对长度
- * @param solver 解算器对象指针
- * @param counts 当前四路编码器累计计数
- * @param lengths_m 输出的四根绳长度
- */
+static float RopePlatformSolver_CountDeltaToLength(const rope_platform_solver_t *solver,
+                                                   uint32_t index,
+                                                   int32_t delta_count)
+{
+    const float delta_theta_rad = (2.0f * ROPE_PLATFORM_PI * (float)delta_count) /
+                                  solver->config.counts_per_rev[index];
+
+    return (float)solver->config.direction_sign[index] *
+           solver->config.drum_radius_m[index] *
+           delta_theta_rad;
+}
+
 static void RopePlatformSolver_BuildLengths(const rope_platform_solver_t *solver,
                                             const int32_t counts[ROPE_PLATFORM_SOLVER_CABLE_COUNT],
                                             float lengths_m[ROPE_PLATFORM_SOLVER_CABLE_COUNT])
@@ -135,25 +114,11 @@ static void RopePlatformSolver_BuildLengths(const rope_platform_solver_t *solver
     for (index = 0U; index < ROPE_PLATFORM_SOLVER_CABLE_COUNT; index++)
     {
         const int32_t delta_count = counts[index] - solver->zero_counts[index];
-        const float delta_theta_rad = (2.0f * ROPE_PLATFORM_PI * (float)delta_count) /
-                                      solver->config.counts_per_rev[index];
-        const float delta_length_m = (float)solver->config.direction_sign[index] *
-                                     solver->config.drum_radius_m[index] *
-                                     delta_theta_rad;
-
+        const float delta_length_m = RopePlatformSolver_CountDeltaToLength(solver, index, delta_count);
         lengths_m[index] = solver->zero_lengths_m[index] + delta_length_m;
     }
 }
 
-/**
- * @brief 用高斯牛顿法求解平台二维位置
- * @param solver 解算器对象指针
- * @param lengths_m 当前四根绳长度
- * @param initial_x_m x 方向初值
- * @param initial_y_m y 方向初值
- * @param result 输出迭代结果
- * @return 解算状态码
- */
 static rope_platform_solver_status_t RopePlatformSolver_SolvePosition(
     const rope_platform_solver_t *solver,
     const float lengths_m[ROPE_PLATFORM_SOLVER_CABLE_COUNT],
@@ -285,10 +250,43 @@ rope_platform_solver_status_t RopePlatformSolver_Init(rope_platform_solver_t *so
     return ROPE_PLATFORM_SOLVER_STATUS_OK;
 }
 
-rope_platform_solver_status_t RopePlatformSolver_SetZeroReference(rope_platform_solver_t *solver,
-                                                                  const int32_t counts[ROPE_PLATFORM_SOLVER_CABLE_COUNT],
-                                                                  float known_x_m,
-                                                                  float known_y_m)
+rope_platform_solver_status_t RopePlatformSolver_UpdateRopeSpeeds(
+    rope_platform_solver_t *solver,
+    const int32_t counts[ROPE_PLATFORM_SOLVER_CABLE_COUNT],
+    float dt_s)
+{
+    uint32_t index;
+
+    if ((solver == NULL) || (counts == NULL) || (dt_s <= 0.0f))
+    {
+        return ROPE_PLATFORM_SOLVER_STATUS_BAD_PARAM;
+    }
+
+    if (solver->initialized == 0U)
+    {
+        return ROPE_PLATFORM_SOLVER_STATUS_NOT_INIT;
+    }
+
+    for (index = 0U; index < ROPE_PLATFORM_SOLVER_CABLE_COUNT; index++)
+    {
+        const int32_t delta_count = counts[index] - solver->last_counts[index];
+        const float delta_length_m = RopePlatformSolver_CountDeltaToLength(solver, index, delta_count);
+        const float rope_speed_raw_mps = delta_length_m / dt_s;
+
+        solver->rope_speeds_mps[index] = RopePlatformSolver_LowPass(rope_speed_raw_mps,
+                                                                    solver->rope_speeds_mps[index],
+                                                                    solver->config.rope_speed_lpf_alpha);
+        solver->last_counts[index] = counts[index];
+    }
+
+    return ROPE_PLATFORM_SOLVER_STATUS_OK;
+}
+
+rope_platform_solver_status_t RopePlatformSolver_SetZeroReference(
+    rope_platform_solver_t *solver,
+    const int32_t counts[ROPE_PLATFORM_SOLVER_CABLE_COUNT],
+    float known_x_m,
+    float known_y_m)
 {
     uint32_t index;
 
@@ -318,6 +316,7 @@ rope_platform_solver_status_t RopePlatformSolver_SetZeroReference(rope_platform_
             return ROPE_PLATFORM_SOLVER_STATUS_GEOMETRY_ERROR;
         }
 
+        solver->last_counts[index] = counts[index];
         solver->zero_counts[index] = counts[index];
         solver->zero_lengths_m[index] = base_length_m;
         solver->rope_lengths_m[index] = base_length_m;
@@ -335,16 +334,24 @@ rope_platform_solver_status_t RopePlatformSolver_SetZeroReference(rope_platform_
     return ROPE_PLATFORM_SOLVER_STATUS_OK;
 }
 
-rope_platform_solver_status_t RopePlatformSolver_Update(rope_platform_solver_t *solver,
-                                                        const int32_t counts[ROPE_PLATFORM_SOLVER_CABLE_COUNT],
-                                                        float dt_s)
+rope_platform_solver_status_t RopePlatformSolver_SetCurrentPoseAsReference(
+    rope_platform_solver_t *solver,
+    const int32_t counts[ROPE_PLATFORM_SOLVER_CABLE_COUNT],
+    float known_x_m,
+    float known_y_m)
+{
+    return RopePlatformSolver_SetZeroReference(solver, counts, known_x_m, known_y_m);
+}
+
+rope_platform_solver_status_t RopePlatformSolver_Update(
+    rope_platform_solver_t *solver,
+    const int32_t counts[ROPE_PLATFORM_SOLVER_CABLE_COUNT],
+    float dt_s)
 {
     float new_lengths_m[ROPE_PLATFORM_SOLVER_CABLE_COUNT];
     rope_platform_solver_iteration_t solve_result;
-    float initial_x_m;
-    float initial_y_m;
-    uint32_t index;
     rope_platform_solver_status_t status;
+    uint32_t index;
 
     if ((solver == NULL) || (counts == NULL) || (dt_s <= 0.0f))
     {
@@ -356,51 +363,42 @@ rope_platform_solver_status_t RopePlatformSolver_Update(rope_platform_solver_t *
         return ROPE_PLATFORM_SOLVER_STATUS_NOT_INIT;
     }
 
+    status = RopePlatformSolver_UpdateRopeSpeeds(solver, counts, dt_s);
+    if (status != ROPE_PLATFORM_SOLVER_STATUS_OK)
+    {
+        return status;
+    }
+
     if (solver->zero_valid == 0U)
     {
         return ROPE_PLATFORM_SOLVER_STATUS_NOT_CALIBRATED;
     }
 
     RopePlatformSolver_BuildLengths(solver, counts, new_lengths_m);
-
     for (index = 0U; index < ROPE_PLATFORM_SOLVER_CABLE_COUNT; index++)
     {
-        const float rope_speed_raw_mps = (new_lengths_m[index] - solver->rope_lengths_m[index]) / dt_s;
-
         if (!RopePlatformSolver_IsFinitePositive(new_lengths_m[index]))
         {
             return ROPE_PLATFORM_SOLVER_STATUS_GEOMETRY_ERROR;
         }
-
-        solver->rope_speeds_mps[index] = RopePlatformSolver_LowPass(rope_speed_raw_mps,
-                                                                    solver->rope_speeds_mps[index],
-                                                                    solver->config.rope_speed_lpf_alpha);
     }
-
-    initial_x_m = solver->position_x_m;
-    initial_y_m = solver->position_y_m;
 
     status = RopePlatformSolver_SolvePosition(solver,
                                               new_lengths_m,
-                                              initial_x_m,
-                                              initial_y_m,
+                                              solver->position_x_m,
+                                              solver->position_y_m,
                                               &solve_result);
     if (status != ROPE_PLATFORM_SOLVER_STATUS_OK)
     {
         return status;
     }
 
-    {
-        const float velocity_x_raw_mps = (solve_result.guess_x_m - solver->position_x_m) / dt_s;
-        const float velocity_y_raw_mps = (solve_result.guess_y_m - solver->position_y_m) / dt_s;
-
-        solver->velocity_x_mps = RopePlatformSolver_LowPass(velocity_x_raw_mps,
-                                                            solver->velocity_x_mps,
-                                                            solver->config.platform_speed_lpf_alpha);
-        solver->velocity_y_mps = RopePlatformSolver_LowPass(velocity_y_raw_mps,
-                                                            solver->velocity_y_mps,
-                                                            solver->config.platform_speed_lpf_alpha);
-    }
+    solver->velocity_x_mps = RopePlatformSolver_LowPass((solve_result.guess_x_m - solver->position_x_m) / dt_s,
+                                                        solver->velocity_x_mps,
+                                                        solver->config.platform_speed_lpf_alpha);
+    solver->velocity_y_mps = RopePlatformSolver_LowPass((solve_result.guess_y_m - solver->position_y_m) / dt_s,
+                                                        solver->velocity_y_mps,
+                                                        solver->config.platform_speed_lpf_alpha);
 
     for (index = 0U; index < ROPE_PLATFORM_SOLVER_CABLE_COUNT; index++)
     {
@@ -449,7 +447,6 @@ rope_platform_solver_status_t RopePlatformSolver_MapPlatformVelocityToRopeSpeeds
             return ROPE_PLATFORM_SOLVER_STATUS_NUMERICAL_ERROR;
         }
 
-        /* dL/dt = (dx * vx + dy * vy) / L */
         rope_speed_refs_mps[index] = ((dx * vx_mps) + (dy * vy_mps)) / rope_length_m;
     }
 

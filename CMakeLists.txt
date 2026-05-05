@@ -50,6 +50,8 @@ add_executable(${CMAKE_PROJECT_NAME}
         Bsp/screen_uart.h
         Algorithm/filter.c
         Algorithm/filter.h
+        Algorithm/pid.c
+        Algorithm/pid.h
         Algorithm/attitude.c
         Algorithm/attitude.h
         Module/alarm_service.c
@@ -73,6 +75,8 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user sources here
         Algorithm/rope_platform_solver.c
         APP/app_platform_drive.c
+        APP/pid_tune_app.c
+        APP/pid_tune_app.h
         APP/vision_app.c
         APP/imu_app.c
 )
